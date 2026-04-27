@@ -14,6 +14,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "cli": "node bin/cli.js",
     "convert": "node bin/cli.js",
     "test": "node test/basic.test.js"
   },
