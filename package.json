@@ -1,0 +1,42 @@
+{
+  "name": "fig-to-json",
+  "version": "1.0.0",
+  "description": "Reusable offline Figma .fig file to JSON converter CLI.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "fig-to-json": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "convert": "node bin/cli.js",
+    "test": "node test/basic.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/allenzhong/fig-to-json.git"
+  },
+  "keywords": [
+    "figma",
+    "fig",
+    "json",
+    "cli",
+    "converter"
+  ],
+  "dependencies": {
+    "pako": "^2.1.0",
+    "fzstd": "^0.1.1",
+    "kiwi-schema": "^0.5.0",
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {},
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
