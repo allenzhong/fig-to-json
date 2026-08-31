@@ -4,13 +4,8 @@
  * fig-to-json CLI
  *
  * Usage:
- *   fig-to-json <input.fig> [--out <file-or-dir>] [--raw] [--tokens] [--images] [--compact]
- *
- * Examples:
- *   fig-to-json design.fig                         # -> stdout
- *   fig-to-json design.fig --out ./output          # -> ./output/design.json
- *   fig-to-json design.fig --out design.json       # -> ./design.json
- *   fig-to-json design.fig --out ./output --tokens # -> also extract tokens.json
+ *   fig-to-json <input.fig> [--out <file-or-dir>] [--raw] [--tokens] [--images]
+ *               [--outline] [--screens] [--node <id>] [--skip-json] [--compact]
  */
 
 import fs from "fs";
@@ -18,8 +13,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { parseFigFile, extractImages } from "../src/fig-parser.js";
 import { cleanTree, extractTokens } from "../src/tree-cleaner.js";
-
-// ─── Argument parsing (no dependencies) ──────────────────────────────
+import { jsonStringify } from "../src/serialize.js";
+import { extractOutline, extractNodeCopy, slugName } from "../src/kiwi-graph.js";
 
 const args = process.argv.slice(2);
 const packageJsonPath = path.resolve(
@@ -36,6 +31,10 @@ function parseArgs(argv) {
     tokens: false,
     images: false,
     compact: false,
+    outline: false,
+    screens: false,
+    skipJson: false,
+    node: null,
     help: false,
     version: false,
   };
@@ -66,6 +65,21 @@ function parseArgs(argv) {
       case "--compact":
         options.compact = true;
         break;
+      case "--outline":
+        options.outline = true;
+        break;
+      case "--screens":
+        options.screens = true;
+        break;
+      case "--skip-json":
+        options.skipJson = true;
+        break;
+      case "--node":
+        if (!argv[i + 1] || argv[i + 1].startsWith("-")) {
+          throw new Error(`${arg} requires a node id (e.g. 6:11681)`);
+        }
+        options.node = argv[++i];
+        break;
       case "--out":
       case "-o":
         if (!argv[i + 1] || argv[i + 1].startsWith("-")) {
@@ -91,8 +105,6 @@ function parseArgs(argv) {
   return options;
 }
 
-// ─── Help ────────────────────────────────────────────────────────────
-
 function printHelp() {
   console.log(`
 fig-to-json - Offline Figma .fig to JSON converter
@@ -102,26 +114,30 @@ USAGE
 
 FLAGS
   -o, --out <path>  Write JSON to a file or directory instead of stdout
-  --raw            Output raw decoded data (no cleanup/stripping)
-  --tokens         Also write design tokens to tokens.json
-  --images         Also extract embedded images to images/
-  --compact        Minified JSON output
-  -v, --version    Show the package version
-  -h, --help       Show this help
+  --raw             Output raw decoded data (no cleanup/stripping)
+  --tokens          Write tokens.json (kiwi fillPaints + REST fills)
+  --images          Extract embedded images to images/
+  --outline         Write outline.json (pages + 1920×1080 screens)
+  --screens         Write screens/<slug>.json copy dumps for each 1920 screen
+  --node <id>       Write copy for one node (e.g. 6:11681) to <id>.json
+  --skip-json       Do not write the full document JSON (use with sidecars)
+  --compact         Minified JSON output
+  -v, --version     Show the package version
+  -h, --help        Show this help
 
 EXAMPLES
   fig-to-json design.fig
   fig-to-json design.fig --out ./output
-  fig-to-json design.fig --out ./output/design.json --compact
-  fig-to-json design.fig --out ./output --tokens --images
+  fig-to-json design.fig --out ./output --tokens --images --outline
+  fig-to-json design.fig --out ./output --screens --skip-json --node 6:11681
+
+  Large files may need:
+    NODE_OPTIONS=--max-old-space-size=8192 fig-to-json design.fig --out ./output
 
 SECURITY
   This tool makes ZERO network calls. All processing is local.
-  Verify with: strace -e network fig-to-json design.fig
 `);
 }
-
-// ─── Main ────────────────────────────────────────────────────────────
 
 function resolveOutput(inputFile, outPath) {
   if (!outPath) {
@@ -171,9 +187,20 @@ function validateOptions(options, outputTarget) {
     throw new Error(`Input file must use the .fig extension: ${options.inputFile}`);
   }
 
-  if (options.images && !outputTarget.sidecarDir) {
-    throw new Error("--images requires --out so image files have a destination directory");
+  const needsDir =
+    options.images ||
+    options.outline ||
+    options.screens ||
+    options.node ||
+    options.skipJson;
+
+  if (needsDir && !outputTarget.sidecarDir) {
+    throw new Error("--out is required for --images, --outline, --screens, --node, and --skip-json");
   }
+}
+
+function writeJson(filePath, value, indent) {
+  fs.writeFileSync(filePath, jsonStringify(value, indent));
 }
 
 async function main() {
@@ -195,11 +222,16 @@ async function main() {
   const fileBuffer = fs.readFileSync(options.inputFile);
   const indent = options.compact ? 0 : 2;
 
+  if (fileBuffer.length > 8 * 1024 * 1024) {
+    console.error(
+      `Large file (${(fileBuffer.length / 1024 / 1024).toFixed(1)} MB). If Node runs out of memory, retry with NODE_OPTIONS=--max-old-space-size=8192`
+    );
+  }
+
   console.error(
     `Parsing: ${options.inputFile} (${(fileBuffer.length / 1024).toFixed(1)} KB)`
   );
 
-  // Parse
   const parsed = await parseFigFile(fileBuffer, { raw: options.raw });
 
   console.error(`File type: ${parsed.__meta.fileType}`);
@@ -210,7 +242,6 @@ async function main() {
     console.error(`Embedded images: ${parsed.__meta.embeddedImages.length}`);
   }
 
-  // Clean (unless raw mode)
   let output;
   if (options.raw) {
     output = parsed;
@@ -221,46 +252,80 @@ async function main() {
     };
   }
 
-  // Extract tokens
-  let tokens = null;
+  const document = output.document;
+
+  if (outputTarget.mode === "stdout") {
+    process.stdout.write(jsonStringify(output, indent));
+    return;
+  }
+
+  fs.mkdirSync(outputTarget.outputDir, { recursive: true });
+
+  if (!options.skipJson) {
+    writeJson(outputTarget.jsonPath, output, indent);
+    console.error(`Written: ${outputTarget.jsonPath}`);
+  }
+
   if (options.tokens) {
-    tokens = extractTokens(output.document);
+    const tokens = extractTokens(document);
+    const tokensPath = path.join(outputTarget.sidecarDir, "tokens.json");
+    writeJson(tokensPath, tokens, indent);
     console.error(
       `Tokens: ${tokens.colors.length} colors, ${tokens.typography.length} type styles, ${tokens.spacing.length} spacing values`
     );
+    console.error(`Written: ${tokensPath}`);
   }
 
-  // Output
-  if (outputTarget.mode === "stdout") {
-    process.stdout.write(JSON.stringify(output, null, indent));
-  } else {
-    fs.mkdirSync(outputTarget.outputDir, { recursive: true });
-    fs.writeFileSync(outputTarget.jsonPath, JSON.stringify(output, null, indent));
-    console.error(`Written: ${outputTarget.jsonPath}`);
-
-    // Tokens
-    if (tokens) {
-      const tokensPath = path.join(outputTarget.sidecarDir, "tokens.json");
-      fs.writeFileSync(tokensPath, JSON.stringify(tokens, null, indent));
-      console.error(`Written: ${tokensPath}`);
+  if (options.outline || options.screens) {
+    const outline = extractOutline(document);
+    if (options.outline) {
+      const outlinePath = path.join(outputTarget.sidecarDir, "outline.json");
+      writeJson(outlinePath, outline, indent);
+      console.error(
+        `Outline: ${outline.pages.length} pages, ${outline.screens.length} 1920×1080 screens`
+      );
+      console.error(`Written: ${outlinePath}`);
     }
+    if (options.screens) {
+      const dir = path.join(outputTarget.sidecarDir, "screens");
+      fs.mkdirSync(dir, { recursive: true });
+      const used = new Set();
+      for (const screen of outline.screens) {
+        let slug = slugName(screen.name);
+        if (used.has(slug)) slug = `${slug}_${screen.id.replace(":", "_")}`;
+        used.add(slug);
+        const copy = extractNodeCopy(document, screen.id);
+        const filePath = path.join(dir, `${slug}.json`);
+        writeJson(filePath, copy, indent);
+      }
+      console.error(`Written: ${dir} (${outline.screens.length} screens)`);
+    }
+  }
 
-    // Images
-    if (options.images) {
-      const images = await extractImages(fileBuffer);
-      if (images.size > 0) {
-        const imgDir = path.join(outputTarget.sidecarDir, "images");
-        fs.mkdirSync(imgDir, { recursive: true });
-        for (const [name, data] of images) {
-          const imgPath = path.join(imgDir, path.basename(name));
-          fs.writeFileSync(imgPath, data);
-          console.error(`Image: ${imgPath}`);
-        }
+  if (options.node) {
+    const copy = extractNodeCopy(document, options.node);
+    const filePath = path.join(
+      outputTarget.sidecarDir,
+      `${options.node.replace(/[^a-zA-Z0-9]+/g, "_")}.json`
+    );
+    writeJson(filePath, copy, indent);
+    console.error(`Written: ${filePath} (${copy.count ?? 0} unique strings)`);
+  }
+
+  if (options.images) {
+    const images = await extractImages(fileBuffer);
+    if (images.size > 0) {
+      const imgDir = path.join(outputTarget.sidecarDir, "images");
+      fs.mkdirSync(imgDir, { recursive: true });
+      for (const [name, data] of images) {
+        const imgPath = path.join(imgDir, path.basename(name));
+        fs.writeFileSync(imgPath, data);
+        console.error(`Image: ${imgPath}`);
       }
     }
-
-    console.error(`\nDone.`);
   }
+
+  console.error(`\nDone.`);
 }
 
 main().catch((err) => {

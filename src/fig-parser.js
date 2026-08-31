@@ -9,6 +9,7 @@
  */
 
 import pako from "pako";
+import { toJsonSafe } from "./serialize.js";
 import * as fzstd from "fzstd";
 import * as kiwi from "kiwi-schema";
 
@@ -62,6 +63,39 @@ function decompress(chunk) {
   }
 }
 
+export function sniffImageExt(bytes) {
+  if (!bytes || bytes.length < 4) return null;
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return "png";
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "jpg";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "gif";
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return "webp";
+  }
+  const head = String.fromCharCode(...bytes.slice(0, 64)).toLowerCase();
+  if (head.includes("<svg")) return "svg";
+  return null;
+}
+
+function imageOutputName(name, data) {
+  const base = name.split("/").filter(Boolean).pop();
+  if (!base || base === "images") return null;
+  if (/\.(png|jpe?g|gif|svg|webp)$/i.test(base)) return base;
+  const ext = sniffImageExt(data);
+  return ext ? `${base}.${ext}` : null;
+}
+
 // ─── ZIP container handling ──────────────────────────────────────────
 
 /**
@@ -94,14 +128,11 @@ async function extractFromZip(bytes) {
       } catch {
         // not valid JSON, skip
       }
-    } else if (
-      name.endsWith(".png") ||
-      name.endsWith(".jpg") ||
-      name.endsWith(".jpeg") ||
-      name.endsWith(".svg") ||
-      name.endsWith(".webp")
-    ) {
-      images[name] = data;
+    } else {
+      const imageName = imageOutputName(name, data);
+      if (imageName) {
+        images[imageName] = data;
+      }
     }
   }
 
@@ -260,6 +291,8 @@ export async function parseFigFile(fileBuffer, options = {}) {
   if (!raw && includeBlobs) {
     decoded = convertBlobsToBase64(decoded);
   }
+
+  decoded = toJsonSafe(decoded);
 
   // Step 7: Assemble result
   const result = {

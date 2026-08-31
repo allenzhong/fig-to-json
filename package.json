@@ -1,11 +1,14 @@
 {
   "name": "fig-to-json",
-  "version": "1.0.0",
-  "description": "Reusable offline Figma .fig file to JSON converter CLI.",
+  "version": "1.1.0",
+  "description": "Offline Figma .fig to JSON converter. Handles kiwi BigInt, fillPaints tokens, and screen copy dumps.",
   "type": "module",
   "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
   "bin": {
-    "fig-to-json": "./bin/cli.js"
+    "fig-to-json": "bin/cli.js"
   },
   "files": [
     "bin/",
