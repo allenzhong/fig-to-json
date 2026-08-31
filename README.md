@@ -10,23 +10,26 @@ Built for environments where the Figma API, MCP, and plugins are restricted, suc
 
 Figma's `.fig` files use the Kiwi binary format with an embedded schema. Most existing Node.js parsers bundle a hardcoded schema that goes stale when Figma updates their format. This tool extracts the schema from the file itself, so it can adapt to different Figma file versions.
 
+Local `.fig` files are a **flat `nodeChanges` graph**, not the REST API tree. Layer names are often stale. Visible copy lives on `textData.characters`. Fills are `fillPaints`, type is `fontName` + `fontSize`. This package reads those kiwi fields.
+
 ## Install
 
+The npm `1.0.4` tarball is a different build **without a CLI `bin`**. Use this git tree until `1.1.0` is published:
+
 ```bash
+# from git (includes the CLI)
+npx github:allenzhong/fig-to-json --help
+
 git clone git@github.com:allenzhong/fig-to-json.git
 cd fig-to-json
 npm install
-```
-
-Run locally:
-
-```bash
 node bin/cli.js --help
 ```
 
-After package installation, use the CLI:
+After `1.1.0` is on npm:
 
 ```bash
+npm i -g fig-to-json
 fig-to-json --help
 ```
 
@@ -41,110 +44,113 @@ fig-to-json design.fig
 # Write to an output directory as ./output/design.json
 fig-to-json design.fig --out ./output
 
-# Write to a specific file
-fig-to-json design.fig --out ./design.json
+# Tokens, images, page/screen outline (no 140MB document dump)
+fig-to-json design.fig --out ./output --tokens --images --outline --skip-json
 
-# Raw mode: no cleanup, all decoded Figma internals preserved
+# Unique visible copy per 1920×1080 frame
+fig-to-json design.fig --out ./output --screens --skip-json
+
+# One node (Figma id session:local, e.g. 6:11681)
+fig-to-json design.fig --out ./output --node 6:11681 --skip-json
+
+# Raw mode: no cleanup
 fig-to-json design.fig --out ./output --raw
 
-# Also extract design tokens to tokens.json
-fig-to-json design.fig --out ./output --tokens
-
-# Also extract embedded images to images/
+# Also extract embedded images to images/ (including hashed `images/<sha>` ZIP entries)
 fig-to-json design.fig --out ./output --images
-
-# Compact JSON
-fig-to-json design.fig --out ./output/design.json --compact
-
-# Pipe to jq for specific nodes
-fig-to-json design.fig | jq '.document'
 ```
 
 Status messages are written to stderr, so stdout stays pipe-safe JSON.
+
+Large files:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=8192 fig-to-json design.fig --out ./output --skip-json --tokens --outline --screens
+```
 
 ## Library Usage
 
 ```javascript
 import fs from "fs";
-import { parseFigFile, cleanTree, extractTokens } from "fig-to-json";
+import {
+  parseFigFile,
+  cleanTree,
+  extractTokens,
+  extractOutline,
+  extractNodeCopy,
+  jsonStringify,
+} from "fig-to-json";
 
 const buffer = fs.readFileSync("design.fig");
 const data = await parseFigFile(buffer);
 
-const cleaned = cleanTree(data.document);
-const tokens = extractTokens(cleaned);
+// parseFigFile already converts BigInt so this will not throw
+fs.writeFileSync("design.json", jsonStringify(data));
 
-fs.writeFileSync("design.json", JSON.stringify(cleaned, null, 2));
-fs.writeFileSync("tokens.json", JSON.stringify(tokens, null, 2));
+const tokens = extractTokens(data.document);
+const outline = extractOutline(data.document);
+const overview = extractNodeCopy(data.document, "6:11681");
 ```
+
+Do **not** call `JSON.stringify(data)` without `jsonStringify` (or a BigInt replacer) on raw kiwi output. Native `JSON.stringify` throws `TypeError: BigInt value can't be serialized in JSON`.
 
 ## Output Structure
 
 ```text
 output/
-├── design.json          # Full design tree
-├── tokens.json          # Extracted design tokens, with --tokens
-└── images/              # Embedded images, with --images
+├── design.json          # Full design tree (omit with --skip-json)
+├── tokens.json          # --tokens
+├── outline.json         # --outline
+├── screens/             # --screens
+│   └── overview.json
+└── images/              # --images
     ├── image1.png
     └── image2.jpg
 ```
 
-### `design.json` shape
-
-```json
-{
-  "__meta": {
-    "fileType": "DESIGN",
-    "version": 6,
-    "parsedAt": "2026-04-24T...",
-    "isZipContainer": true,
-    "embeddedImages": ["images/abc.png"]
-  },
-  "metadata": {},
-  "document": {
-    "type": "DOCUMENT",
-    "children": [
-      {
-        "type": "CANVAS",
-        "name": "Page 1",
-        "children": []
-      }
-    ]
-  }
-}
-```
-
 ### `tokens.json` shape
+
+Colors are counted from kiwi `fillPaints` / `strokePaints` and REST `fills`:
 
 ```json
 {
   "colors": [
-    { "name": "#3366ff", "value": "PrimaryButton" }
+    { "hex": "#FFFAF4", "count": 12, "sample": "Overview", "name": "#FFFAF4", "value": "Overview" }
   ],
   "typography": [
     {
-      "name": "Inter-16-400",
+      "name": "Inter-Bold-18",
       "fontFamily": "Inter",
-      "fontSize": 16,
-      "fontWeight": 400,
-      "lineHeight": 24
+      "fontStyle": "Bold",
+      "fontSize": 18
     }
   ],
-  "spacing": [4, 8, 12, 16, 24, 32]
+  "spacing": [4, 8, 12, 16, 24]
+}
+```
+
+### Screen copy shape
+
+`t` is `textData.characters` (what the user sees). `layer` is the layer name (often outdated).
+
+```json
+{
+  "id": "6:11681",
+  "name": "Overview",
+  "count": 65,
+  "texts": [
+    { "t": "TikTok Command Center", "layer": "Executive Performance Overview", "font": "Inter Bold", "size": 18 }
+  ]
 }
 ```
 
 ## Pipeline: `.fig` to React components
 
 ```bash
-# Step 1: Convert
-fig-to-json design.fig --out ./output --tokens
+fig-to-json design.fig --out ./output --tokens --outline --screens --skip-json
 
-# Step 2: Feed to an LLM
-cat output/design.json | your-llm-cli "Generate React components using these tokens..."
-
-# Or use jq to extract a specific frame first
-cat output/design.json | jq '.document.children[0].children[] | select(.name == "LoginCard")' > login-card.json
+# Feed a single screen, not the 140MB dump
+cat output/screens/overview.json | your-llm-cli "Implement this dashboard screen..."
 ```
 
 ## Dependencies
@@ -182,7 +188,8 @@ npm ls --all
 - The `.fig` format is an unstable internal format, and Figma can change it without notice.
 - Variable/token names are not always preserved.
 - Some binary blob data, such as vector paths and gradients, is base64-encoded but not human-readable.
-- Very large files may need `--max-old-space-size` for Node.js.
+- Very large files may need `--max-old-space-size` and `--skip-json`.
+- npm `fig-to-json@1.0.4` does not ship `bin/cli.js`. Use this git tree until 1.1.0 is published.
 
 ## How it works
 
@@ -193,7 +200,8 @@ npm ls --all
 5. Decompress each chunk with deflate or zstandard.
 6. Decode the schema from the file itself.
 7. Use the schema to decode the data chunk into a JavaScript object.
-8. Optionally clean the tree, extract tokens, and write sidecar assets.
+8. Convert BigInt / blobs so the result is JSON-serializable.
+9. Optionally clean the tree, extract tokens, outline, screen copy, and sidecar assets.
 
 ## License
 

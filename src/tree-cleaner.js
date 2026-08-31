@@ -129,8 +129,18 @@ export function extractTokens(tree) {
 
   walkForTokens(tree, { colors, typography, spacing });
 
+  const colorList = [...colors.entries()]
+    .map(([hex, meta]) => ({
+      hex,
+      count: meta.count,
+      sample: meta.sample,
+      name: hex,
+      value: meta.sample,
+    }))
+    .sort((a, b) => b.count - a.count);
+
   return {
-    colors: [...colors.entries()].map(([name, value]) => ({ name, value })),
+    colors: colorList,
     typography: [...typography.entries()].map(([name, value]) => ({
       name,
       ...value,
@@ -147,43 +157,69 @@ function walkForTokens(node, acc, depth = 0) {
     return;
   }
 
-  // Extract color fills
-  if (node.fills && Array.isArray(node.fills)) {
-    for (const fill of node.fills) {
-      if (fill.type === "SOLID" && fill.color) {
-        const { r, g, b, a = 1 } = fill.color;
-        const hex = rgbToHex(r, g, b);
-        const name = node.name || "unnamed";
-        acc.colors.set(hex, name);
+  collectSolidPaints(node.fillPaints, node, acc);
+  collectSolidPaints(node.strokePaints, node, acc);
+  collectSolidPaints(node.fills, node, acc);
+  collectSolidPaints(node.strokes, node, acc);
+
+  if (node.type === "TEXT") {
+    const family = node.fontName?.family || node.style?.fontFamily;
+    const fontStyle = node.fontName?.style;
+    const fontSize = node.fontSize ?? node.style?.fontSize;
+    const fontWeight = node.style?.fontWeight;
+    if (family && fontSize != null) {
+      const key = `${family}-${fontStyle || fontWeight || ""}-${fontSize}`;
+      if (!acc.typography.has(key)) {
+        acc.typography.set(key, {
+          fontFamily: family,
+          fontStyle: fontStyle,
+          fontSize,
+          fontWeight,
+          lineHeight:
+            node.lineHeight ??
+            node.style?.lineHeightPx ??
+            node.style?.lineHeight,
+          letterSpacing: node.letterSpacing ?? node.style?.letterSpacing,
+        });
       }
     }
   }
 
-  // Extract typography
-  if (node.type === "TEXT" && node.style) {
-    const s = node.style;
-    const key = `${s.fontFamily}-${s.fontSize}-${s.fontWeight}`;
-    if (!acc.typography.has(key)) {
-      acc.typography.set(key, {
-        fontFamily: s.fontFamily,
-        fontSize: s.fontSize,
-        fontWeight: s.fontWeight,
-        lineHeight: s.lineHeightPx || s.lineHeight,
-        letterSpacing: s.letterSpacing,
-      });
-    }
+  for (const key of [
+    "itemSpacing",
+    "paddingLeft",
+    "paddingRight",
+    "paddingTop",
+    "paddingBottom",
+    "stackSpacing",
+    "stackCounterSpacing",
+    "stackHorizontalPadding",
+    "stackVerticalPadding",
+    "stackPaddingRight",
+    "stackPaddingBottom",
+    "gridRowGap",
+    "gridColumnGap",
+  ]) {
+    if (typeof node[key] === "number") acc.spacing.add(node[key]);
   }
-
-  // Extract spacing values from auto-layout
-  if (node.itemSpacing !== undefined) acc.spacing.add(node.itemSpacing);
-  if (node.paddingLeft !== undefined) acc.spacing.add(node.paddingLeft);
-  if (node.paddingRight !== undefined) acc.spacing.add(node.paddingRight);
-  if (node.paddingTop !== undefined) acc.spacing.add(node.paddingTop);
-  if (node.paddingBottom !== undefined) acc.spacing.add(node.paddingBottom);
 
   // Recurse
   for (const value of Object.values(node)) {
     walkForTokens(value, acc, depth + 1);
+  }
+}
+
+function collectSolidPaints(paints, node, acc) {
+  if (!Array.isArray(paints)) return;
+  for (const fill of paints) {
+    if (fill.type === "SOLID" && fill.color) {
+      const { r, g, b } = fill.color;
+      const hex = rgbToHex(r, g, b);
+      const prev = acc.colors.get(hex) || { count: 0, sample: node.name || "unnamed" };
+      prev.count += 1;
+      if (!prev.sample) prev.sample = node.name || "unnamed";
+      acc.colors.set(hex, prev);
+    }
   }
 }
 
